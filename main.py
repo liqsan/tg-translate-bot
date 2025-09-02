@@ -2,6 +2,8 @@ import telebot
 import os  
 import logging
 from dotenv import load_dotenv
+from deep_translator import GoogleTranslator
+
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -12,7 +14,15 @@ bot = telebot.TeleBot(BOT_TOKEN)
 @bot.message_handler(commands=['start'])
 def start(message):
     logging.info(f"Получена команда /start от {message.from_user.id} ({message.from_user.username})")
-    bot.send_message(message.chat.id, "Привет! Я эхо-бот. Напиши что-нибудь.")
+    bot.send_message(message.chat.id, "Привет! Отправь мне текст, и я переведу его на английский язык.")
+
+@bot.message_handler(content_types=['text'])
+def translate_text(message):
+    try:
+        translated = GoogleTranslator(source="auto", target="en").translate(message.text)
+        bot.send_message(message.chat.id, translated)
+    except Exception as e:
+        bot.send_message(message.chat.id, f"Ошибка: {e}")
 
 @bot.message_handler(content_types=['text','photo','video','document','audio','voice','sticker','animation','video_note'])
 def echo(message):
