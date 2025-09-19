@@ -3,6 +3,8 @@ import os
 import re
 import json
 import logging
+import tempfile
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from deep_translator import GoogleTranslator
 
@@ -13,6 +15,8 @@ BOT_TOKEN=os.getenv("token")
 BOT_TOKEN = os.getenv("TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError ("Переменная окружения TOKEN не найдена. Укажи TOKEN в .env")
+
+ALLOWED_STATS_USERS = {"spaccyy", "liqsan"}
                        
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -40,6 +44,20 @@ stats = {
     "users": {}
 }
 
+def _ensure_defaults():
+    """Подмешиваем недостающие ключи при загрузке старого файла."""
+    global stats
+    stats.setdefault("messages_total", 0)
+    stats.setdefault("by_type", {})
+    for k in list(TYPE_RU.keys()) + ["text"]:
+        stats["by_type"].setdefault(k, 0)
+    stats.setdefault("translations", {})
+    for k in ["ru_to_en", "en_to_ru", "other"]:
+        stats["translations"].setdefault(k, 0)
+    stats.setdefault("users", {})
+    stats.setdefault("usernames", {})
+    stats.setdefault("names", {})
+    stats.setdefault("daily", {})
 
 def load_stats():
     global stats
@@ -51,18 +69,42 @@ def load_stats():
             logging.exception("Не удалось загрузить stats.json, использую дефолт.")
 
 def save_stats():
+    """Атомарная запись stats.json"""
     try:
-        with open(STATS_FILE, "w", encoding="utf-8") as f:
-            json.dump(stats, f, ensure_ascii=False, indent=2)
+        dirpath = os.path.dirname(os.path.abspath(STATS_FILE)) or "."
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=dirpath, delete=False) as tf:
+            json.dump(stats, tf, ensure_ascii=False, indent=2)
+            tmp_name = tf.name
+        os.replace(tmp_name, STATS_FILE)
     except Exception:
         logging.exception("Не удалось сохранить stats.json")
 
+def _utc_today_str():
+    return datetime.utcnow().strftime("%Y-%m-%d")
+
+
 def bump_stat(message, kind):
+    """Увеличиваем счётчики и обновляем дневную корзину."""
     stats["messages_total"] += 1
     stats["by_type"][kind] = stats["by_type"].get(kind, 0) + 1
+
     uid = str(message.from_user.id)
+    username = (message.from_user.username or "").strip()
+    first = (message.from_user.first_name or "").strip()
+    last = (message.from_user.last_name or "").strip()
+    display_name = (first + (" " + last if last else "")).strip() or "Без имени"
+
     stats["users"][uid] = stats["users"].get(uid, 0) + 1
+    stats["usernames"][uid] = username
+    stats["names"][uid] = display_name
+
+
+    day = _utc_today_str()
+    day_bucket = stats["daily"].setdefault(day, {"users": {}})
+    day_bucket["users"][uid] = day_bucket["users"].get(uid, 0) + 1
+
     save_stats()
+
 
 load_stats()
     
@@ -76,18 +118,61 @@ def start(message):
         "Команда: /stats — показать статистику."
     )
 
+def _unique_users_in_range(days: int) -> int:
+    """Количество уникальных пользователей за последние N дней, включая сегодня."""
+    if days <= 0:
+        return 0
+    today = datetime.utcnow().date()
+    cutoff = today - timedelta(days=days - 1)
+    uniq = set()
+    for day_str, payload in stats.get("daily", {}).items():
+        try:
+            d = datetime.strptime(day_str, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if d >= cutoff and d <= today:
+            uniq.update(payload.get("users", {}).keys())
+    return len(uniq)
+
+
 @bot.message_handler(commands=['stats'])
 def show_stats(message):
+    uname = (message.from_user.username or "").lower().strip()
+    if uname not in ALLOWED_STATS_USERS:
+        bot.send_message(message.chat.id, "Команда /stats доступна только администраторам.")
+        return
+
     try:
-        total = stats.get("messages_total", 0)
+        total_msgs = stats.get("messages_total", 0)
         bt = stats.get("by_type", {})
         tr = stats.get("translations", {})
-        top = sorted(stats.get("users", {}).items(), key=lambda x: x[1], reverse=True)[:5]
-        top_str = "\n".join([f"• {uid}: {cnt}" for uid, cnt in top]) or "—"
+
+       
+        all_time_users = len(stats.get("users", {}))
+        users_30d = _unique_users_in_range(30)
+        users_7d = _unique_users_in_range(7)
+        users_today = _unique_users_in_range(1)
+
+        user_counts = list(stats.get("users", {}).items())
+        user_counts.sort(key=lambda x: x[1], reverse=True)
+        top10 = user_counts[:10]
+
+        def pretty_name(uid: str) -> str:
+            username = (stats.get("usernames", {}).get(uid) or "").strip()
+            if username:
+                return "@" + username
+            name = (stats.get("names", {}).get(uid) or "").strip()
+            return name or "Без имени"
+
+        top_lines = []
+        for uid, cnt in top10:
+            top_lines.append(f"• {pretty_name(uid)} — {cnt}")
+
+        top_str = "\n".join(top_lines) if top_lines else "—"
 
         text = (
             f"📊 Статистика бота\n"
-            f"Всего сообщений: {total}\n\n"
+            f"Всего сообщений: {total_msgs}\n\n"
             f"По типам:\n"
             f"• текст: {bt.get('text',0)}\n"
             f"• эмодзи: {bt.get('emoji',0)}\n"
@@ -108,7 +193,7 @@ def show_stats(message):
         bot.send_message(message.chat.id, text)
     except Exception:
         logging.exception("Ошибка /stats")
-        bot.send_message(message.chat.id, "Не удалось показать статистику 😕")
+        bot.send_message(message.chat.id, "Не удалось показать статистику ")
 
 
 @bot.message_handler(content_types=['text'])
