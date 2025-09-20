@@ -10,11 +10,41 @@ from deep_translator import GoogleTranslator
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-BOT_TOKEN=os.getenv("token")
+
 
 BOT_TOKEN = os.getenv("TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError ("Переменная окружения TOKEN не найдена. Укажи TOKEN в .env")
+    raise RuntimeError("Переменная окружения TOKEN не найдена. Укажи TOKEN в .env")
+
+STATS_FILE = "stats.json"
+
+def _ensure_defaults():
+    global stats
+    stats.setdefault("messages_total", 0)
+
+    stats.setdefault("by_type", {})
+    for k in list(TYPE_RU.keys()) + ["text"]:
+        stats["by_type"].setdefault(k, 0)
+
+    stats.setdefault("translations", {})
+    for k in ["ru_to_en", "en_to_ru", "other"]:
+        stats["translations"].setdefault(k, 0)
+
+    stats.setdefault("users", {})
+    stats.setdefault("usernames", {})
+    stats.setdefault("names", {})
+    stats.setdefault("daily", {})
+
+def load_stats():
+    global stats
+    if os.path.exists(STATS_FILE):
+        try:
+            with open(STATS_FILE, "r", encoding="utf-8") as f:
+                stats = json.load(f)
+        except Exception:
+            logging.exception("Не удалось загрузить stats.json, использую дефолт.")
+    _ensure_defaults()
+
 
 ALLOWED_STATS_USERS = {"spaccyy", "liqsan"}
                        
@@ -84,7 +114,6 @@ def _utc_today_str():
 
 
 def bump_stat(message, kind):
-    """Увеличиваем счётчики и обновляем дневную корзину."""
     stats["messages_total"] += 1
     stats["by_type"][kind] = stats["by_type"].get(kind, 0) + 1
 
@@ -95,16 +124,14 @@ def bump_stat(message, kind):
     display_name = (first + (" " + last if last else "")).strip() or "Без имени"
 
     stats["users"][uid] = stats["users"].get(uid, 0) + 1
-    stats["usernames"][uid] = username
-    stats["names"][uid] = display_name
-
+    stats.setdefault("usernames", {})[uid] = username
+    stats.setdefault("names", {})[uid] = display_name
 
     day = _utc_today_str()
-    day_bucket = stats["daily"].setdefault(day, {"users": {}})
+    day_bucket = stats.setdefault("daily", {}).setdefault(day, {"users": {}})
     day_bucket["users"][uid] = day_bucket["users"].get(uid, 0) + 1
 
     save_stats()
-
 
 load_stats()
     
