@@ -1,0 +1,51 @@
+{
+  "messages_total": 18,
+  "by_type": {
+    "sticker": 1,
+    "photo": 1,
+    "video": 0,
+    "document": 0,
+    "audio": 0,
+    "voice": 1,
+    "animation": 0,
+    "video_note": 0,
+    "emoji": 1,
+    "text": 14
+  },
+  "translations": {
+    "ru_to_en": 9,
+    "en_to_ru": 5,
+    "other": 0
+  },
+  "users": {
+    "1246338860": 18
+  },
+  "usernames": {
+    "1246338860": "liqsan"
+  },
+  "names": {
+    "1246338860": "evgenia abramova"
+  },
+  "daily": {
+    "2025-09-20": {
+      "users": {
+        "1246338860": 9
+      }
+    },
+    "2025-09-21": {
+      "users": {
+        "1246338860": 2
+      }
+    },
+    "2025-10-01": {
+      "users": {
+        "1246338860": 4
+      }
+    },
+    "2025-10-04": {
+      "users": {
+        "1246338860": 3
+      }
+    }
+  }
+}
