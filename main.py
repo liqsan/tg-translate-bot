@@ -3,9 +3,10 @@ import re
 import json
 import logging
 import tempfile
+import time
 from datetime import datetime, timedelta, UTC
 from dotenv import load_dotenv
-from deep_translator import GoogleTranslator
+from deep_translator import GoogleTranslator, MyMemoryTranslator
 import telebot
 from telebot import types
 
@@ -22,6 +23,7 @@ STATS_FILE = "stats.json"
 CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 LATIN_RE = re.compile(r"[A-Za-z]")
 ONLY_EMOJI_RE = re.compile(r"^\W+$", re.UNICODE)
+PUNCT_ONLY_RE = re.compile(r"^\s*[\W_]+\s*$", re.UNICODE)
 
 TYPE_RU = {
     "sticker": "стикеры",
@@ -134,31 +136,133 @@ class StatsManager:
 stats_mgr = StatsManager(STATS_FILE, TYPE_RU)
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Команды: приватные чаты
-bot.set_my_commands([
-    types.BotCommand("start", "начать работу с ботом"),
-    types.BotCommand("users", "количество пользователей"),
-    types.BotCommand("stats", "полная статистика (для админов)"),
-], scope=types.BotCommandScopeAllPrivateChats())
-
-# Команды: групповые чаты (показываем только /users)
-bot.set_my_commands([
-    types.BotCommand("users", "количество пользователей"),
-], scope=types.BotCommandScopeAllGroupChats())
+bot.set_my_commands(
+    [types.BotCommand("start", "начать работу с ботом")],
+    scope=types.BotCommandScopeAllPrivateChats()
+)
 
 ME = bot.get_me()
 BOT_USERNAME = (ME.username or "").lower()
 BOT_ID = ME.id
 
+def is_admin_user(message) -> bool:
+    uname = (message.from_user.username or "").lower().strip()
+    return uname in ALLOWED_STATS_USERS
+
 def reply(chat_id: int, text: str, thread_id=None, parse_mode=None):
     bot.send_message(chat_id, text, message_thread_id=thread_id, parse_mode=parse_mode)
 
+def extract_text_from_message(msg):
+    if msg is None:
+        return ""
+    if getattr(msg, "text", None):
+        return (msg.text or "").strip()
+    if getattr(msg, "caption", None):
+        return (msg.caption or "").strip()
+    return ""
+
+def is_bot_mentioned_in_entities(message) -> bool:
+    text = (getattr(message, "text", None) or getattr(message, "caption", None) or "")
+    entities = getattr(message, "entities", None) or getattr(message, "caption_entities", None) or []
+    for e in entities:
+        if e.type == "mention":
+            try:
+                segment = text[e.offset:e.offset+e.length]
+            except Exception:
+                segment = ""
+            if segment.lower() == f"@{BOT_USERNAME}":
+                return True
+        if e.type == "text_mention" and getattr(e, "user", None) and e.user.id == BOT_ID:
+            return True
+    return False
+
+def remove_bot_mentions(text: str, message) -> str:
+    if not text:
+        return text
+    out = text
+    entities = getattr(message, "entities", None) or getattr(message, "caption_entities", None) or []
+    cut = []
+    for e in entities:
+        if e.type == "mention":
+            try:
+                segment = text[e.offset:e.offset+e.length]
+            except Exception:
+                segment = ""
+            if segment.lower() == f"@{BOT_USERNAME}":
+                cut.append((e.offset, e.offset+e.length))
+        if e.type == "text_mention" and getattr(e, "user", None) and e.user.id == BOT_ID:
+            cut.append((e.offset, e.offset+e.length))
+    if cut:
+        cut.sort()
+        res = []
+        i = 0
+        for a, b in cut:
+            if i < a:
+                res.append(out[i:a])
+            i = b
+        res.append(out[i:])
+        out = "".join(res)
+    out = out.replace(f"@{BOT_USERNAME}", "")
+    return out.strip()
+
+def detect_direction(text: str):
+    if CYRILLIC_RE.search(text) and not LATIN_RE.search(text):
+        return ("en", "ru_to_en")
+    elif LATIN_RE.search(text) and not CYRILLIC_RE.search(text):
+        return ("ru", "en_to_ru")
+    else:
+        return ("en", "other")
+
+def safe_translate(text: str, target_lang: str) -> str:
+    err = None
+    for attempt in range(3):
+        try:
+            return GoogleTranslator(source="auto", target=target_lang, timeout=10).translate(text)
+        except Exception as e:
+            err = e
+            time.sleep(0.8 * (2 ** attempt))
+    try:
+        return MyMemoryTranslator(source="auto", target=target_lang).translate(text)
+    except Exception:
+        pass
+    raise err if err else RuntimeError("translate failed")
+
+def translate_and_reply(message, source_text: str):
+    source_text = (source_text or "").strip()
+    if not source_text:
+        reply(message.chat.id, "Нет текста для перевода.", getattr(message, "message_thread_id", None))
+        return
+    if ONLY_EMOJI_RE.match(source_text):
+        stats_mgr.record_event(message, "emoji")
+        stats_mgr.flush()
+        reply(message.chat.id, "Я пока не умею обрабатывать эмодзи.", getattr(message, "message_thread_id", None))
+        return
+    stats_mgr.record_event(message, "text")
+    stats_mgr.flush()
+    target_lang, direction = detect_direction(source_text)
+    try:
+        translated = safe_translate(source_text, target_lang)
+        reply(message.chat.id, translated, getattr(message, "message_thread_id", None))
+        stats_mgr.record_translation(direction)
+        stats_mgr.flush()
+    except Exception:
+        logging.exception("Ошибка перевода")
+        reply(message.chat.id, "Перевод временно недоступен. Попробуйте ещё раз позже.", getattr(message, "message_thread_id", None))
+
 @bot.message_handler(commands=['start'])
 def start(message):
-    reply(message.chat.id, "Привет! Отправь мне текст — я переведу его на русский или английский.\nВ группах используй: @имябота текст", getattr(message, "message_thread_id", None))
+    reply(
+        message.chat.id,
+        "Привет! Отправь мне текст — я переведу его на русский или английский.\n"
+        "В группах используй: @имябота текст или ответь на сообщение с упоминанием бота — переведу то сообщение.",
+        getattr(message, "message_thread_id", None)
+    )
 
 @bot.message_handler(commands=['users'])
 def users_counter(message):
+    if not is_admin_user(message):
+        reply(message.chat.id, "Команда /users доступна только администраторам.")
+        return
     all_time_users = len(stats_mgr.stats.get("users", {}))
     users_30d = stats_mgr.unique_users_in_range(30)
     users_7d = stats_mgr.unique_users_in_range(7)
@@ -174,8 +278,7 @@ def users_counter(message):
 
 @bot.message_handler(commands=['stats'])
 def show_stats(message):
-    uname = (message.from_user.username or "").lower().strip()
-    if uname not in ALLOWED_STATS_USERS:
+    if not is_admin_user(message):
         reply(message.chat.id, "Команда /stats доступна только администраторам.")
         return
     try:
@@ -221,53 +324,51 @@ def show_stats(message):
         logging.exception("Ошибка /stats")
         reply(message.chat.id, "Не удалось показать статистику")
 
+def handle_group_trigger_and_translate(message, text_source: str):
+    if not (message.chat.type in ["group", "supergroup"]):
+        translate_and_reply(message, text_source)
+        return
+    mentioned = is_bot_mentioned_in_entities(message) or (f"@{BOT_USERNAME}" in (text_source or "").lower())
+    if not mentioned:
+        return
+    cleaned = remove_bot_mentions(text_source or "", message)
+    if ((not cleaned) or PUNCT_ONLY_RE.match(cleaned)) and message.reply_to_message:
+        source = extract_text_from_message(message.reply_to_message)
+        translate_and_reply(message, source)
+    elif cleaned:
+        translate_and_reply(message, cleaned)
+    elif message.reply_to_message:
+        source = extract_text_from_message(message.reply_to_message)
+        translate_and_reply(message, source)
+    else:
+        reply(message.chat.id, "Нет текста для перевода.", getattr(message, "message_thread_id", None))
+
 @bot.message_handler(content_types=['text'])
 def translate_text(message):
     text = (message.text or "").strip()
     if not text:
         return
-    in_group = message.chat.type in ["group", "supergroup"]
-    if in_group:
-        lower = text.lower()
-        mention = f"@{BOT_USERNAME}"
-        if mention not in lower:
-            return
-        while mention in lower:
-            idx = lower.find(mention)
-            text = text[:idx] + text[idx+len(mention):]
-            lower = text.lower()
-        text = text.strip()
-        if not text:
-            return
-    if ONLY_EMOJI_RE.match(text):
-        stats_mgr.record_event(message, "emoji")
-        stats_mgr.flush()
-        reply(message.chat.id, "Я пока не умею обрабатывать эмодзи.", getattr(message, "message_thread_id", None))
-        return
-    stats_mgr.record_event(message, "text")
-    stats_mgr.flush()
-    if CYRILLIC_RE.search(text) and not LATIN_RE.search(text):
-        target_lang = "en"; direction = "ru_to_en"
-    elif LATIN_RE.search(text) and not CYRILLIC_RE.search(text):
-        target_lang = "ru"; direction = "en_to_ru"
-    else:
-        target_lang = "en"; direction = "other"
-    try:
-        translated = GoogleTranslator(source="auto", target=target_lang).translate(text)
-        reply(message.chat.id, translated, getattr(message, "message_thread_id", None))
-        stats_mgr.record_translation(direction)
-        stats_mgr.flush()
-    except Exception:
-        logging.exception("Ошибка перевода")
-        reply(message.chat.id, "Ошибка перевода. Попробуйте чуть позже.", getattr(message, "message_thread_id", None))
+    handle_group_trigger_and_translate(message, text)
 
 @bot.message_handler(content_types=['photo','video','document','audio','voice','sticker','animation','video_note'])
-def echo_unsupported(message):
-    ct = message.content_type
-    stats_mgr.record_event(message, ct)
-    stats_mgr.flush()
-    ru = TYPE_RU.get(ct, "этот тип контента")
-    reply(message.chat.id, f"Я пока не умею обрабатывать {ru}.", getattr(message, "message_thread_id", None))
+def handle_media(message):
+    caption = extract_text_from_message(message)
+    if message.chat.type in ["group","supergroup"]:
+        if not is_bot_mentioned_in_entities(message) and f"@{BOT_USERNAME}" not in caption.lower():
+            stats_mgr.record_event(message, message.content_type)
+            stats_mgr.flush()
+            return
+        caption = remove_bot_mentions(caption, message)
+        if ((not caption) or PUNCT_ONLY_RE.match(caption)) and message.reply_to_message:
+            source = extract_text_from_message(message.reply_to_message)
+            translate_and_reply(message, source)
+            return
+    if caption:
+        translate_and_reply(message, caption)
+    else:
+        stats_mgr.record_event(message, message.content_type)
+        stats_mgr.flush()
+        reply(message.chat.id, "У этого медиа нет подписи для перевода.", getattr(message, "message_thread_id", None))
 
 logging.info("Бот запущен и слушает сообщения...")
 bot.polling(none_stop=True, skip_pending=True, timeout=60)

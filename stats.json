@@ -1,5 +1,5 @@
 {
-  "messages_total": 18,
+  "messages_total": 22,
   "by_type": {
     "sticker": 1,
     "photo": 1,
@@ -10,21 +10,24 @@
     "animation": 0,
     "video_note": 0,
     "emoji": 1,
-    "text": 14
+    "text": 18
   },
   "translations": {
-    "ru_to_en": 9,
+    "ru_to_en": 13,
     "en_to_ru": 5,
     "other": 0
   },
   "users": {
-    "1246338860": 18
+    "1246338860": 21,
+    "543644479": 1
   },
   "usernames": {
-    "1246338860": "liqsan"
+    "1246338860": "liqsan",
+    "543644479": "spaccyy"
   },
   "names": {
-    "1246338860": "evgenia abramova"
+    "1246338860": "evgenia abramova",
+    "543644479": "Антон 🦇"
   },
   "daily": {
     "2025-09-20": {
@@ -45,6 +48,12 @@
     "2025-10-04": {
       "users": {
         "1246338860": 3
+      }
+    },
+    "2025-10-11": {
+      "users": {
+        "1246338860": 3,
+        "543644479": 1
       }
     }
   }
